@@ -97,8 +97,10 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file_options={"content-type": "image/jpeg", "upsert": "true"}
             )
         
-        # 🔥 الحصول على الرابط الأصلي
-        original_url = supabase.storage.from_("image-links").get_public_url(f"{user_id}/{image_id}.jpg")
+        # 🔥 الحصول على الرابط الأصلي (بناء يدوي مضمون)
+        bucket_name = "image-links"
+        file_path = f"{user_id}/{image_id}.jpg"
+        original_url = f"{SUPABASE_URL}/storage/v1/object/public/{bucket_name}/{file_path}"
         
         # 🔥 الرابط المختصر
         short_url = f"{SHORTENER_URL}/i/{image_id}"
