@@ -110,6 +110,11 @@ def get_image_by_id(image_id: str):
 def increment_views(image_id: str):
     """زيادة عدد المشاهدات"""
     try:
-        supabase.table("image_links").update({"views_count": supabase.rpc('increment', {'x': 1})}).eq("image_id", image_id).execute()
+        # الطريقة الصحيحة: جلب العدد الحالي ثم زيادته
+        result = supabase.table("image_links").select("views_count").eq("image_id", image_id).execute()
+        if result.data:
+            current_views = result.data[0].get('views_count', 0)
+            new_views = current_views + 1
+            supabase.table("image_links").update({"views_count": new_views}).eq("image_id", image_id).execute()
     except Exception as e:
         print(f"Error in increment_views: {e}")
