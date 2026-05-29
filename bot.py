@@ -77,15 +77,19 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.message.reply_text("🖼️ جاري المعالجة...")
         
+        # تحميل الصورة
         photo_file = await update.message.photo[-1].get_file()
         await photo_file.download_to_drive(temp_raw)
         
+        # ضغط الصورة
         if not compress_image(temp_raw, temp_comp):
             await update.message.reply_text("❌ فشل في معالجة الصورة")
             return
         
+        # إنشاء معرف فريد
         image_id = generate_image_id()
         
+        # رفع الصورة إلى Supabase Storage
         with open(temp_comp, 'rb') as f:
             supabase.storage.from_("image-links").upload(
                 path=f"{user_id}/{image_id}.jpg",
@@ -93,8 +97,25 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file_options={"content-type": "image/jpeg", "upsert": "true"}
             )
         
+        # 🔥 الحصول على الرابط الأصلي
+        original_url = supabase.storage.from_("image-links").get_public_url(f"{user_id}/{image_id}.jpg")
+        
+        # 🔥 الرابط المختصر
         short_url = f"{SHORTENER_URL}/i/{image_id}"
         
+        # 🔥 حفظ البيانات في جدول image_links
+        file_size = os.path.getsize(temp_comp) // 1024
+        supabase.table("image_links").insert({
+            "image_id": image_id,
+            "user_telegram_id": user_id,
+            "first_name": update.message.from_user.first_name,
+            "username": update.message.from_user.username,
+            "original_url": original_url,
+            "short_url": short_url,
+            "file_size": file_size
+        }).execute()
+        
+        # إرسال الرابط للمستخدم
         await update.message.reply_text(
             f"✅ **تم تحويل صورتك!**\n\n"
             f"🔗 {short_url}",
