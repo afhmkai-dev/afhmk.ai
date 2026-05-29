@@ -3,8 +3,9 @@ import os
 import secrets
 import logging
 import asyncio
+import threading
 from datetime import datetime
-from flask import Flask, redirect
+from flask import Flask
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -15,16 +16,29 @@ logger = logging.getLogger(__name__)
 # إعدادات البيئة
 TOKEN = os.environ.get('BOT_TOKEN')
 PORT = int(os.environ.get('PORT', 10000))
-
-# إعدادات السيرفر المختصر
-SHORTENER_URL = os.environ.get('SHORTENER_URL', 'https://image-link-bot.onrender.com')
+RENDER_URL = os.environ.get('RENDER_URL', 'ime-link-bot.onrender.com')
+SHORTENER_URL = f"https://{RENDER_URL}"
 
 # استيرادات المشروع
 from utils.db import get_or_create_user, can_upload, increment_user_images, save_image_link, get_image_by_id, increment_views
 from utils.storage import compress_image, upload_to_supabase
 
-# إنشاء تطبيق Flask للروابط المختصرة
+# =================================================================================
+# إنشاء تطبيق Flask لصفحة الصحة (Health Check)
+# =================================================================================
 flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def home():
+    return {"status": "ok", "service": "Image Link Bot"}
+
+@flask_app.route('/health')
+def health():
+    return {"status": "healthy"}, 200
+
+def run_flask():
+    """تشغيل خادم Flask في خيط منفصل"""
+    flask_app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
 
 # =================================================================================
 # دوال مساعدة
@@ -175,43 +189,47 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ حدث خطأ: {str(e)[:100]}")
         
     finally:
-        # تنظيف الملفات المؤقتة
         for path in [temp_raw, temp_compressed]:
             if os.path.exists(path):
                 os.remove(path)
 
 # =================================================================================
-# تشغيل البوت
+# تشغيل البوت (متزامن مع Flask)
 # =================================================================================
 
-async def set_commands(application: Application):
-    """تعيين قائمة الأوامر"""
-    commands = [
-        BotCommand("start", "🚀 بدء الاستخدام"),
-        BotCommand("help", "📖 المساعدة"),
-        BotCommand("stats", "📊 إحصائياتي"),
-    ]
-    await application.bot.set_my_commands(commands)
-
-def main():
+async def run_bot():
     """تشغيل البوت"""
     application = Application.builder().token(TOKEN).build()
     
-    # إضافة الأوامر
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(MessageHandler(filters.PHOTO, handle_image))
     
     # تعيين الأوامر
-    asyncio.run(set_commands(application))
+    commands = [
+        BotCommand("start", "🚀 بدء الاستخدام"),
+        BotCommand("help", "📖 المساعدة"),
+        BotCommand("stats", "📊 إحصائياتي"),
+    ]
+    await application.bot.set_my_commands(commands)
     
     print("=" * 60)
     print("🖼️ Image Link Bot - تحويل الصور إلى روابط")
-    print(f"✅ البوت شغال @{os.environ.get('BOT_USERNAME', 'ime_link_bot')}")
+    print(f"✅ البوت شغال @ime_link_bot")
     print("=" * 60)
     
-    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    await application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
+def main():
+    """الدالة الرئيسية - تشغيل Flask في خيط منفصل والبوت في الخيط الرئيسي"""
+    # تشغيل Flask في خيط منفصل
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
+    # تشغيل البوت في الخيط الرئيسي
+    asyncio.run(run_bot())
 
 if __name__ == '__main__':
     main()
