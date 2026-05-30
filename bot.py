@@ -340,7 +340,7 @@ async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif duration == 365:
                 message += f"👑 **سنوي:**\n• {daily_limit} صورة يومياً\n• السعر: {price}$ / سنة (توفير 16%)\n\n"
         
-        message += "✨ **طرق الدفع المتاحة قريباً:**\n• ⭐ نجوم Telegram\n• 💳 بطاقات الائتمان\n\nللاشتراك، تواصل مع المطور: @YourSupportBot"
+        message += "✨ **طرق الدفع المتاحة قريباً:**\n• ⭐ نجوم Telegram\n• 💳 بطاقات الائتمان\n\nللاشتراك، تواصل مع المطور: @Alshabany_Ai"
         
         await update.message.reply_text(message)
         
