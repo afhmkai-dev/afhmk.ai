@@ -1,11 +1,7 @@
 python-telegram-bot==22.6
-flask==3.0.0
-flask-cors==4.0.0
-gunicorn==21.2.0
-supabase>=2.0.0
-Pillow==9.5.0
-requests==2.31.0
-python-dotenv==1.0.1
 flask==3.0.3
+flask-cors==4.0.1
 gunicorn==22.0.0
 supabase==2.5.1
+Pillow==10.3.0
+python-dotenv==1.0.1
