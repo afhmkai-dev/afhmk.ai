@@ -76,17 +76,21 @@ def get_or_create_image_user(telegram_id: int, first_name: str = None, username:
         if result.data:
             return result.data[0]
         
-        # إنشاء مستخدم جديد
+        # ✅ إنشاء مستخدم جديد - متوافق مع هيكل الجدول الحالي
+        from datetime import datetime
+        
         user_data = {
             "telegram_id": telegram_id,
-            "first_name": first_name,
-            "username": username,
+            "first_name": first_name or "",
+            "username": username or "",
             "status": "active",
-            "plan": "free",
             "total_images": 0,
-            "daily_count": 0,
-            "last_upload_date": None
+            "daily_limit": 5,  # ✅ الحد اليومي الافتراضي
+            "plan": "free",
+            "last_use_at": datetime.now().isoformat()  # ✅ استخدام last_use_at
         }
+        
+        print(f"Creating user with data: {user_data}")
         
         new_user = supabase.table("image_users").insert(user_data).execute()
         return new_user.data[0]
@@ -118,6 +122,8 @@ def get_user_plan_limit(telegram_id: int) -> int:
 def can_user_upload(telegram_id: int):
     """التحقق من إمكانية رفع الصورة (الحد اليومي)"""
     try:
+        from datetime import datetime, date
+        
         user = get_or_create_image_user(telegram_id)
         if not user:
             return False, "حدث خطأ في النظام"
@@ -126,23 +132,28 @@ def can_user_upload(telegram_id: int):
         if user.get('status') == 'blocked':
             return False, "⛔ تم حظر حسابك، يرجى التواصل مع الدعم"
         
-        daily_limit = get_user_plan_limit(telegram_id)
+        # ✅ استخدام daily_limit بدلاً من daily_count
+        daily_limit = user.get('daily_limit', 5)
         
-        # التحقق من التاريخ (إعادة تعيين العداد اليومي)
-        last_date = user.get('last_upload_date')
-        today = date.today()
+        # ✅ استخدام last_use_at للتحقق من التاريخ
+        last_use = user.get('last_use_at')
+        today = date.today().isoformat()
         
-        if last_date != str(today):
-            # يوم جديد، إعادة تعيين العداد
-            supabase.table("image_users").update({
-                "daily_count": 0,
-                "last_upload_date": today.isoformat()
-            }).eq("telegram_id", telegram_id).execute()
-            daily_count = 0
-        else:
-            daily_count = user.get('daily_count', 0) or 0
+        # التحقق من عدد الصور المرسلة اليوم
+        # ملاحظة: الجدول لا يحتفظ بعدد يومي منفصل، لذلك نحتاج حساب الصور اليوم
+        from datetime import datetime
         
-        # التحقق من الحد اليومي
+        # جلب عدد الصور التي رفعها المستخدم اليوم من جدول image_links
+        result = supabase.table("image_links").select("id", "created_at").eq("user_telegram_id", telegram_id).execute()
+        
+        # حساب عدد الصور المرفوعة اليوم
+        daily_count = 0
+        for link in result.data:
+            created_at = link.get('created_at')
+            if created_at and created_at.startswith(today):
+                daily_count += 1
+        
+        # ✅ التحقق من الحد اليومي
         if daily_count >= daily_limit:
             plan_name = user.get('plan', 'free')
             if plan_name == 'free':
@@ -160,21 +171,19 @@ def can_user_upload(telegram_id: int):
 def increment_user_upload(telegram_id: int):
     """زيادة عدد الصور المحولة للمستخدم"""
     try:
-        today = date.today()
+        from datetime import datetime
         
-        # جلب القيمة الحالية أولاً
-        user = supabase.table("image_users").select("daily_count", "total_images").eq("telegram_id", telegram_id).execute()
-        
-        if user.data:
-            new_daily = (user.data[0].get('daily_count', 0) or 0) + 1
-            new_total = (user.data[0].get('total_images', 0) or 0) + 1
+        # جلب القيمة الحالية
+        user = get_user(telegram_id)
+        if user:
+            new_total = (user.get('total_images', 0) or 0) + 1
             
             supabase.table("image_users").update({
-                "daily_count": new_daily,
                 "total_images": new_total,
-                "last_upload_date": today.isoformat()
+                "last_use_at": datetime.now().isoformat()
             }).eq("telegram_id", telegram_id).execute()
-            print(f"Updated user {telegram_id}: daily={new_daily}, total={new_total}")
+            
+            print(f"Updated user {telegram_id}: total_images={new_total}")
         
     except Exception as e:
         print(f"Error in increment_user_upload: {e}")
@@ -208,14 +217,26 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """الأمر /stats - عرض إحصائيات المستخدم"""
     user_id = update.message.from_user.id
+    
     user = get_or_create_image_user(user_id, update.message.from_user.first_name, update.message.from_user.username)
     
     if user:
         total = user.get('total_images', 0) or 0
-        daily = user.get('daily_count', 0) or 0
+        daily_limit = user.get('daily_limit', 5)
         plan = user.get('plan', 'free')
-        daily_limit = get_user_plan_limit(user_id)
-        remaining = daily_limit - daily if daily_limit - daily > 0 else 0
+        
+        # حساب عدد الصور اليوم
+        from datetime import date
+        today = date.today().isoformat()
+        
+        result = supabase.table("image_links").select("id", "created_at").eq("user_telegram_id", user_id).execute()
+        daily_count = 0
+        for link in result.data:
+            created_at = link.get('created_at')
+            if created_at and created_at.startswith(today):
+                daily_count += 1
+        
+        remaining = daily_limit - daily_count if daily_limit - daily_count > 0 else 0
         
         plan_emoji = "💎" if plan != 'free' else "🎁"
         plan_name = "مميز" if plan != 'free' else "مجاني"
@@ -224,7 +245,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📊 **إحصائياتك الشخصية**\n\n"
             f"{plan_emoji} **الخطة:** {plan_name}\n"
             f"🖼️ **إجمالي الصور:** {total}\n"
-            f"📈 **اليوم:** {daily} / {daily_limit}\n"
+            f"📈 **اليوم:** {daily_count} / {daily_limit}\n"
             f"⏳ **المتبقي اليوم:** {remaining}\n\n"
             f"✨ أرسل صوراً جديدة لزيادة رصيدك!"
         )
