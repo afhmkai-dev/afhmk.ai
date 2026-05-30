@@ -405,13 +405,14 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "file_size": file_size
         }).execute()
         
-        # ✅ زيادة العداد
+        # ✅ زيادة العداد اليومي والإجمالي
         increment_user_upload(user_id)
         
-        # إرسال الرابط للمستخدم مع المتبقي
+        # ✅ إرسال الرابط للمستخدم مع الرابط المختصر والرابط المباشر
         await update.message.reply_text(
             f"✅ **تم تحويل صورتك!**\n\n"
-            f"🔗 {short_url}\n\n"
+            f"🔗 **الرابط المختصر:**\n{short_url}\n\n"
+            f"📎 **الرابط المباشر (كامل):**\n{original_url}\n\n"
             f"📊 متبقي لك اليوم: {message} صورة\n"
             f"💡 استخدم /stats لعرض إحصائياتك",
             disable_web_page_preview=True
