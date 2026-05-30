@@ -23,7 +23,6 @@ logging.basicConfig(level=logging.INFO)
 # =================================================================================
 
 def get_image_by_id(image_id: str):
-    """جلب بيانات الصورة"""
     try:
         result = supabase.table("image_links").select("*").eq("image_id", image_id).execute()
         return result.data[0] if result.data else None
@@ -32,7 +31,6 @@ def get_image_by_id(image_id: str):
         return None
 
 def increment_views(image_id: str):
-    """زيادة عدد المشاهدات"""
     try:
         result = supabase.table("image_links").select("views_count").eq("image_id", image_id).execute()
         if result.data:
@@ -46,12 +44,10 @@ def increment_views(image_id: str):
 # =================================================================================
 
 def check_auth():
-    """التحقق من المصادقة"""
     auth_token = request.cookies.get('admin_auth')
     return auth_token == ADMIN_PASSWORD
 
 def get_stats():
-    """جلب الإحصائيات العامة"""
     try:
         users_result = supabase.table("image_users").select("*", count="exact").execute()
         total_users = users_result.count or 0
@@ -91,7 +87,6 @@ def get_stats():
         return {}
 
 def get_all_users():
-    """جلب جميع المستخدمين"""
     try:
         users_result = supabase.table("image_users").select("*").order("created_at", desc=True).execute()
         users = users_result.data
@@ -122,15 +117,6 @@ def get_all_users():
         logging.error(f"Error get_all_users: {e}")
         return []
 
-def get_plans():
-    """جلب الخطط"""
-    try:
-        result = supabase.table("image_plans").select("*").execute()
-        return {plan['plan_name']: plan for plan in result.data}
-    except Exception as e:
-        logging.error(f"Error get_plans: {e}")
-        return {}
-
 # =================================================================================
 # مسارات عرض الصور (الوظيفة الأساسية)
 # =================================================================================
@@ -145,7 +131,6 @@ def health_check():
 
 @app.route('/i/<image_id>')
 def show_image(image_id):
-    """عرض الصورة عبر الرابط المختصر"""
     try:
         image = get_image_by_id(image_id)
         if not image:
@@ -166,7 +151,6 @@ def show_image(image_id):
 # مسارات لوحة التحكم الإدارية
 # =================================================================================
 
-# قوالب HTML مضمنة (لتبسيط النشر)
 ADMIN_LOGIN_HTML = '''
 <!DOCTYPE html>
 <html dir="rtl" lang="ar">
@@ -256,8 +240,7 @@ def admin_dashboard():
     stats = get_stats()
     users = get_all_users()
     
-    # قالب مبسط للوحة التحكم (يمكنك توسيعه)
-    html = '''
+    DASHBOARD_HTML = '''
     <!DOCTYPE html>
     <html dir="rtl" lang="ar">
     <head>
@@ -339,8 +322,8 @@ def admin_dashboard():
                                 <form method="POST" action="/admin/upgrade-user" style="display: inline;">
                                     <input type="hidden" name="user_id" value="{{ user.user_id }}">
                                     <select name="plan_name" style="padding: 2px 4px; font-size: 0.7rem;">
-                                        <option value="premium_monthly">شهري</option>
-                                        <option value="premium_yearly">سنوي</option>
+                                        <option value="premium_monthly">🌙 شهري</option>
+                                        <option value="premium_yearly">🎉 سنوي</option>
                                     </select>
                                     <button type="submit" class="upgrade-btn">⭐ ترقية</button>
                                 </form>
@@ -371,7 +354,7 @@ def admin_dashboard():
     </body>
     </html>
     '''
-    return render_template_string(html, stats=stats, users=users)
+    return render_template_string(DASHBOARD_HTML, stats=stats, users=users)
 
 @app.route('/admin/upgrade-user', methods=['POST'])
 def upgrade_user():
