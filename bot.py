@@ -32,7 +32,6 @@ threading.Thread(target=run_flask, daemon=True).start()
 TOKEN = os.environ.get('BOT_TOKEN')
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
 SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
-SUPABASE_SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')  # ✅ استخدم هذا
 RENDER_URL = os.environ.get('RENDER_URL', 'ime-link-bot.onrender.com')
 SHORTENER_URL = f"https://{RENDER_URL}"
 
