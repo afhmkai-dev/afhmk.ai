@@ -3,7 +3,7 @@ import os
 import secrets
 import logging
 import threading
-from datetime import date, datetime
+from datetime import datetime, date
 from flask import Flask, jsonify
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -64,8 +64,42 @@ def compress_image(input_path, output_path):
         return False
 
 # =================================================================================
-# دوال المستخدمين والحد اليومي
+# دوال المستخدمين والخطط (باستخدام جدول image_plans)
 # =================================================================================
+
+def get_plan_from_db(plan_name: str):
+    """جلب بيانات الخطة من جدول image_plans"""
+    try:
+        result = supabase.table("image_plans").select("*").eq("plan_name", plan_name).execute()
+        if result.data:
+            return result.data[0]
+        return None
+    except Exception as e:
+        print(f"Error in get_plan_from_db: {e}")
+        return None
+
+def get_user_plan_from_db(telegram_id: int):
+    """الحصول على خطة المستخدم من قاعدة البيانات"""
+    try:
+        user = supabase.table("image_users").select("plan").eq("telegram_id", telegram_id).execute()
+        if not user.data:
+            return 'free'
+        return user.data[0].get('plan', 'free')
+    except Exception as e:
+        print(f"Error in get_user_plan_from_db: {e}")
+        return 'free'
+
+def get_user_daily_limit_from_plan(telegram_id: int) -> int:
+    """الحصول على الحد اليومي للمستخدم من جدول الخطط"""
+    try:
+        plan_name = get_user_plan_from_db(telegram_id)
+        plan = get_plan_from_db(plan_name)
+        if plan:
+            return plan.get('daily_limit', 5)
+        return 5
+    except Exception as e:
+        print(f"Error in get_user_daily_limit_from_plan: {e}")
+        return 5
 
 def get_or_create_image_user(telegram_id: int, first_name: str = None, username: str = None):
     """الحصول على مستخدم أو إنشاؤه"""
@@ -76,8 +110,9 @@ def get_or_create_image_user(telegram_id: int, first_name: str = None, username:
         if result.data:
             return result.data[0]
         
-        # ✅ إنشاء مستخدم جديد - متوافق مع هيكل الجدول الحالي
-        from datetime import datetime
+        # ✅ جلب الحد الافتراضي من جدول الخطط للخطة المجانية
+        default_plan = get_plan_from_db('free')
+        default_limit = default_plan.get('daily_limit', 5) if default_plan else 5
         
         user_data = {
             "telegram_id": telegram_id,
@@ -85,12 +120,12 @@ def get_or_create_image_user(telegram_id: int, first_name: str = None, username:
             "username": username or "",
             "status": "active",
             "total_images": 0,
-            "daily_limit": 5,  # ✅ الحد اليومي الافتراضي
+            "daily_limit": default_limit,
             "plan": "free",
-            "last_use_at": datetime.now().isoformat()  # ✅ استخدام last_use_at
+            "last_use_at": datetime.now().isoformat()
         }
         
-        print(f"Creating user with data: {user_data}")
+        print(f"Creating user: {telegram_id} with daily_limit: {default_limit}")
         
         new_user = supabase.table("image_users").insert(user_data).execute()
         return new_user.data[0]
@@ -99,31 +134,18 @@ def get_or_create_image_user(telegram_id: int, first_name: str = None, username:
         print(f"Error in get_or_create_image_user: {e}")
         return None
 
-def get_user_plan_limit(telegram_id: int) -> int:
-    """الحصول على الحد اليومي للمستخدم حسب خطته"""
+def get_user(telegram_id: int):
+    """جلب بيانات مستخدم"""
     try:
-        # جلب خطة المستخدم
-        user = supabase.table("image_users").select("plan").eq("telegram_id", telegram_id).execute()
-        if not user.data:
-            return 5  # الحد الافتراضي
-        
-        plan_name = user.data[0].get('plan', 'free')
-        
-        # جلب الحد من جدول الخطط
-        plan = supabase.table("image_plans").select("daily_limit").eq("plan_name", plan_name).execute()
-        if plan.data:
-            return plan.data[0].get('daily_limit', 5)
-        
-        return 5
+        result = supabase.table("image_users").select("*").eq("telegram_id", telegram_id).execute()
+        return result.data[0] if result.data else None
     except Exception as e:
-        print(f"Error in get_user_plan_limit: {e}")
-        return 5
+        print(f"Error in get_user: {e}")
+        return None
 
 def can_user_upload(telegram_id: int):
     """التحقق من إمكانية رفع الصورة (الحد اليومي)"""
     try:
-        from datetime import datetime, date
-        
         user = get_or_create_image_user(telegram_id)
         if not user:
             return False, "حدث خطأ في النظام"
@@ -132,28 +154,28 @@ def can_user_upload(telegram_id: int):
         if user.get('status') == 'blocked':
             return False, "⛔ تم حظر حسابك، يرجى التواصل مع الدعم"
         
-        # ✅ استخدام daily_limit بدلاً من daily_count
-        daily_limit = user.get('daily_limit', 5)
+        # ✅ جلب الحد اليومي من جدول الخطط
+        daily_limit = get_user_daily_limit_from_plan(telegram_id)
         
-        # ✅ استخدام last_use_at للتحقق من التاريخ
-        last_use = user.get('last_use_at')
+        # ✅ تحديث daily_limit في جدول المستخدم إذا تغير (مهم عند ترقية المستخدم)
+        current_limit = user.get('daily_limit', 5)
+        if current_limit != daily_limit:
+            supabase.table("image_users").update({
+                "daily_limit": daily_limit
+            }).eq("telegram_id", telegram_id).execute()
+            print(f"Updated daily_limit for user {telegram_id}: {current_limit} -> {daily_limit}")
+        
         today = date.today().isoformat()
         
-        # التحقق من عدد الصور المرسلة اليوم
-        # ملاحظة: الجدول لا يحتفظ بعدد يومي منفصل، لذلك نحتاج حساب الصور اليوم
-        from datetime import datetime
-        
-        # جلب عدد الصور التي رفعها المستخدم اليوم من جدول image_links
+        # جلب عدد الصور المرفوعة اليوم من جدول image_links
         result = supabase.table("image_links").select("id", "created_at").eq("user_telegram_id", telegram_id).execute()
         
-        # حساب عدد الصور المرفوعة اليوم
         daily_count = 0
         for link in result.data:
             created_at = link.get('created_at')
             if created_at and created_at.startswith(today):
                 daily_count += 1
         
-        # ✅ التحقق من الحد اليومي
         if daily_count >= daily_limit:
             plan_name = user.get('plan', 'free')
             if plan_name == 'free':
@@ -171,9 +193,6 @@ def can_user_upload(telegram_id: int):
 def increment_user_upload(telegram_id: int):
     """زيادة عدد الصور المحولة للمستخدم"""
     try:
-        from datetime import datetime
-        
-        # جلب القيمة الحالية
         user = get_user(telegram_id)
         if user:
             new_total = (user.get('total_images', 0) or 0) + 1
@@ -198,20 +217,23 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.message.from_user.username
     
     # تسجيل المستخدم في قاعدة البيانات
-    get_or_create_image_user(user_id, first_name, username)
+    user = get_or_create_image_user(user_id, first_name, username)
+    
+    # جلب الحد اليومي من جدول الخطط
+    daily_limit = get_user_daily_limit_from_plan(user_id)
     
     await update.message.reply_text(
-        "🖼️ **مرحباً بك في بوت تحويل الصور!**\n\n"
-        "📤 أرسل لي أي صورة وسأقوم بـ:\n"
-        "• ضغطها تلقائياً\n"
-        "• رفعها إلى السحابة\n"
-        "• إعطائك رابطاً مختصراً\n\n"
-        "📊 **حدك اليومي:** 5 صور (للمستخدم المجاني)\n"
-        "💎 اشترك في الباقة المميزة للحصول على 100 صورة يومياً!\n\n"
-        "🔧 **الأوامر المتاحة:**\n"
-        "/stats - عرض إحصائياتك\n"
-        "/myplan - عرض خطتك الحالية\n"
-        "/premium - معلومات الاشتراك المميز"
+        f"🖼️ **مرحباً بك في بوت تحويل الصور!**\n\n"
+        f"📤 أرسل لي أي صورة وسأقوم بـ:\n"
+        f"• ضغطها تلقائياً\n"
+        f"• رفعها إلى السحابة\n"
+        f"• إعطائك رابطاً مختصراً\n\n"
+        f"📊 **حدك اليومي:** {daily_limit} صورة\n"
+        f"💎 اشترك في الباقة المميزة للحصول على 100 صورة يومياً!\n\n"
+        f"🔧 **الأوامر المتاحة:**\n"
+        f"/stats - عرض إحصائياتك\n"
+        f"/myplan - عرض خطتك الحالية\n"
+        f"/premium - معلومات الاشتراك المميز"
     )
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -222,14 +244,15 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if user:
         total = user.get('total_images', 0) or 0
-        daily_limit = user.get('daily_limit', 5)
         plan = user.get('plan', 'free')
         
-        # حساب عدد الصور اليوم
-        from datetime import date
-        today = date.today().isoformat()
+        # ✅ جلب الحد اليومي من جدول الخطط
+        daily_limit = get_user_daily_limit_from_plan(user_id)
         
+        # حساب عدد الصور اليوم من جدول image_links
+        today = date.today().isoformat()
         result = supabase.table("image_links").select("id", "created_at").eq("user_telegram_id", user_id).execute()
+        
         daily_count = 0
         for link in result.data:
             created_at = link.get('created_at')
@@ -259,46 +282,71 @@ async def myplan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if user:
         plan = user.get('plan', 'free')
-        premium_until = user.get('premium_until')
+        daily_limit = get_user_daily_limit_from_plan(user_id)
         
-        if plan != 'free' and premium_until:
+        # جلب تفاصيل الخطة من جدول image_plans
+        plan_details = get_plan_from_db(plan)
+        
+        if plan != 'free' and plan_details:
+            price = plan_details.get('price', 0)
+            duration = plan_details.get('duration_days', 0)
+            duration_text = f"{duration} يوماً" if duration == 30 else f"{duration} يوماً"
+            
             await update.message.reply_text(
                 f"💎 **خطتك الحالية: مميز**\n\n"
-                f"📅 ينتهي الاشتراك في: {premium_until}\n"
-                f"📊 حدك اليومي: {get_user_plan_limit(user_id)} صورة\n\n"
+                f"📊 حدك اليومي: {daily_limit} صورة\n"
+                f"💰 السعر: {price}$ لكل {duration_text}\n\n"
                 f"لتجديد اشتراكك، استخدم الأمر /premium"
             )
         else:
+            # جلب سعر الخطة المميزة
+            premium_plan = get_plan_from_db('premium_monthly')
+            premium_price = premium_plan.get('price', 5) if premium_plan else 5
+            
             await update.message.reply_text(
                 f"🎁 **خطتك الحالية: مجانية**\n\n"
-                f"📊 حدك اليومي: {get_user_plan_limit(user_id)} صورة\n\n"
-                f"للترقية إلى الخطة المميزة، استخدم الأمر /premium"
+                f"📊 حدك اليومي: {daily_limit} صورة\n\n"
+                f"💎 للترقية إلى الخطة المميزة:\n"
+                f"• {daily_limit} → 100 صورة يومياً\n"
+                f"• السعر: {premium_price}$ فقط\n\n"
+                f"استخدم الأمر /premium للاشتراك"
             )
     else:
         await update.message.reply_text("❌ حدث خطأ")
 
 async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """الأمر /premium - عرض خطط الاشتراك"""
-    await update.message.reply_text(
-        "💎 **باقات الاشتراك المميز**\n\n"
-        "📊 **الباقة المجانية:**\n"
-        "• 5 صور يومياً\n"
-        "• ضغط تلقائي للصور\n"
-        "• روابط مختصرة\n\n"
-        "💎 **الباقة المميزة (شهري - 5$):**\n"
-        "• 100 صورة يومياً\n"
-        "• ضغط تلقائي للصور\n"
-        "• روابط مختصرة\n"
-        "• دعم الأولوية\n\n"
-        "👑 **الباقة المميزة (سنوي - 50$):**\n"
-        "• 100 صورة يومياً\n"
-        "• خصم 16%\n"
-        "• جميع ميزات الباقة المميزة\n\n"
-        "✨ **طرق الدفع المتاحة قريباً:**\n"
-        "• ⭐ نجوم Telegram\n"
-        "• 💳 بطاقات الائتمان\n\n"
-        "للاشتراك، تواصل مع المطور: @YourSupportBot"
-    )
+    """الأمر /premium - عرض خطط الاشتراك من قاعدة البيانات"""
+    try:
+        # جلب الخطط من قاعدة البيانات
+        result = supabase.table("image_plans").select("*").eq("is_active", True).execute()
+        plans = result.data
+        
+        if not plans:
+            await update.message.reply_text("💎 خطط الاشتراك غير متاحة حالياً، يرجى المحاولة لاحقاً")
+            return
+        
+        message = "💎 **باقات الاشتراك المميز**\n\n"
+        
+        for plan in plans:
+            plan_name = plan.get('plan_name')
+            daily_limit = plan.get('daily_limit')
+            price = plan.get('price')
+            duration = plan.get('duration_days')
+            
+            if plan_name == 'free':
+                message += f"🎁 **مجاني:**\n• {daily_limit} صورة يومياً\n• السعر: مجاني\n\n"
+            elif duration == 30:
+                message += f"💎 **شهري:**\n• {daily_limit} صورة يومياً\n• السعر: {price}$ / شهر\n\n"
+            elif duration == 365:
+                message += f"👑 **سنوي:**\n• {daily_limit} صورة يومياً\n• السعر: {price}$ / سنة (توفير 16%)\n\n"
+        
+        message += "✨ **طرق الدفع المتاحة قريباً:**\n• ⭐ نجوم Telegram\n• 💳 بطاقات الائتمان\n\nللاشتراك، تواصل مع المطور: @YourSupportBot"
+        
+        await update.message.reply_text(message)
+        
+    except Exception as e:
+        print(f"Error in premium_command: {e}")
+        await update.message.reply_text("❌ حدث خطأ في عرض الخطط")
 
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -357,7 +405,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "file_size": file_size
         }).execute()
         
-        # ✅ زيادة العداد اليومي والإجمالي
+        # ✅ زيادة العداد
         increment_user_upload(user_id)
         
         # إرسال الرابط للمستخدم مع المتبقي
