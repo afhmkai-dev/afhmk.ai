@@ -3,7 +3,7 @@ import os
 import secrets
 import logging
 import threading
-from datetime import datetime
+from datetime import date, datetime
 from flask import Flask, jsonify
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -60,21 +60,240 @@ def compress_image(input_path, output_path):
             img.save(output_path, "JPEG", optimize=True, quality=60)
             return True
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error in compress_image: {e}")
         return False
+
+# =================================================================================
+# دوال المستخدمين والحد اليومي
+# =================================================================================
+
+def get_or_create_image_user(telegram_id: int, first_name: str = None, username: str = None):
+    """الحصول على مستخدم أو إنشاؤه"""
+    try:
+        # البحث عن المستخدم
+        result = supabase.table("image_users").select("*").eq("telegram_id", telegram_id).execute()
+        
+        if result.data:
+            return result.data[0]
+        
+        # إنشاء مستخدم جديد
+        user_data = {
+            "telegram_id": telegram_id,
+            "first_name": first_name,
+            "username": username,
+            "status": "active",
+            "plan": "free",
+            "total_images": 0,
+            "daily_count": 0,
+            "last_upload_date": None
+        }
+        
+        new_user = supabase.table("image_users").insert(user_data).execute()
+        return new_user.data[0]
+        
+    except Exception as e:
+        print(f"Error in get_or_create_image_user: {e}")
+        return None
+
+def get_user_plan_limit(telegram_id: int) -> int:
+    """الحصول على الحد اليومي للمستخدم حسب خطته"""
+    try:
+        # جلب خطة المستخدم
+        user = supabase.table("image_users").select("plan").eq("telegram_id", telegram_id).execute()
+        if not user.data:
+            return 5  # الحد الافتراضي
+        
+        plan_name = user.data[0].get('plan', 'free')
+        
+        # جلب الحد من جدول الخطط
+        plan = supabase.table("image_plans").select("daily_limit").eq("plan_name", plan_name).execute()
+        if plan.data:
+            return plan.data[0].get('daily_limit', 5)
+        
+        return 5
+    except Exception as e:
+        print(f"Error in get_user_plan_limit: {e}")
+        return 5
+
+def can_user_upload(telegram_id: int):
+    """التحقق من إمكانية رفع الصورة (الحد اليومي)"""
+    try:
+        user = get_or_create_image_user(telegram_id)
+        if not user:
+            return False, "حدث خطأ في النظام"
+        
+        # التحقق من الحظر
+        if user.get('status') == 'blocked':
+            return False, "⛔ تم حظر حسابك، يرجى التواصل مع الدعم"
+        
+        daily_limit = get_user_plan_limit(telegram_id)
+        
+        # التحقق من التاريخ (إعادة تعيين العداد اليومي)
+        last_date = user.get('last_upload_date')
+        today = date.today()
+        
+        if last_date != str(today):
+            # يوم جديد، إعادة تعيين العداد
+            supabase.table("image_users").update({
+                "daily_count": 0,
+                "last_upload_date": today.isoformat()
+            }).eq("telegram_id", telegram_id).execute()
+            daily_count = 0
+        else:
+            daily_count = user.get('daily_count', 0) or 0
+        
+        # التحقق من الحد اليومي
+        if daily_count >= daily_limit:
+            plan_name = user.get('plan', 'free')
+            if plan_name == 'free':
+                return False, f"⏳ **لقد وصلت للحد اليومي!**\n\n📊 الحد اليومي: {daily_limit} صورة\n💎 لرفع المزيد، اشترك في الباقة المميزة عبر /premium"
+            else:
+                return False, f"⏳ **لقد وصلت للحد اليومي!**\n\n📊 الحد اليومي: {daily_limit} صورة\n🔄 يمكنك المحاولة غداً"
+        
+        remaining = daily_limit - daily_count
+        return True, remaining
+        
+    except Exception as e:
+        print(f"Error in can_user_upload: {e}")
+        return False, "حدث خطأ في النظام"
+
+def increment_user_upload(telegram_id: int):
+    """زيادة عدد الصور المحولة للمستخدم"""
+    try:
+        today = date.today()
+        
+        # جلب القيمة الحالية أولاً
+        user = supabase.table("image_users").select("daily_count", "total_images").eq("telegram_id", telegram_id).execute()
+        
+        if user.data:
+            new_daily = (user.data[0].get('daily_count', 0) or 0) + 1
+            new_total = (user.data[0].get('total_images', 0) or 0) + 1
+            
+            supabase.table("image_users").update({
+                "daily_count": new_daily,
+                "total_images": new_total,
+                "last_upload_date": today.isoformat()
+            }).eq("telegram_id", telegram_id).execute()
+            print(f"Updated user {telegram_id}: daily={new_daily}, total={new_total}")
+        
+    except Exception as e:
+        print(f"Error in increment_user_upload: {e}")
 
 # =================================================================================
 # أوامر البوت
 # =================================================================================
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🖼️ أرسل صورة وسأعطيك رابطاً مباشراً")
+    user_id = update.message.from_user.id
+    first_name = update.message.from_user.first_name
+    username = update.message.from_user.username
+    
+    # تسجيل المستخدم في قاعدة البيانات
+    get_or_create_image_user(user_id, first_name, username)
+    
+    await update.message.reply_text(
+        "🖼️ **مرحباً بك في بوت تحويل الصور!**\n\n"
+        "📤 أرسل لي أي صورة وسأقوم بـ:\n"
+        "• ضغطها تلقائياً\n"
+        "• رفعها إلى السحابة\n"
+        "• إعطائك رابطاً مختصراً\n\n"
+        "📊 **حدك اليومي:** 5 صور (للمستخدم المجاني)\n"
+        "💎 اشترك في الباقة المميزة للحصول على 100 صورة يومياً!\n\n"
+        "🔧 **الأوامر المتاحة:**\n"
+        "/stats - عرض إحصائياتك\n"
+        "/myplan - عرض خطتك الحالية\n"
+        "/premium - معلومات الاشتراك المميز"
+    )
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """الأمر /stats - عرض إحصائيات المستخدم"""
+    user_id = update.message.from_user.id
+    user = get_or_create_image_user(user_id, update.message.from_user.first_name, update.message.from_user.username)
+    
+    if user:
+        total = user.get('total_images', 0) or 0
+        daily = user.get('daily_count', 0) or 0
+        plan = user.get('plan', 'free')
+        daily_limit = get_user_plan_limit(user_id)
+        remaining = daily_limit - daily if daily_limit - daily > 0 else 0
+        
+        plan_emoji = "💎" if plan != 'free' else "🎁"
+        plan_name = "مميز" if plan != 'free' else "مجاني"
+        
+        await update.message.reply_text(
+            f"📊 **إحصائياتك الشخصية**\n\n"
+            f"{plan_emoji} **الخطة:** {plan_name}\n"
+            f"🖼️ **إجمالي الصور:** {total}\n"
+            f"📈 **اليوم:** {daily} / {daily_limit}\n"
+            f"⏳ **المتبقي اليوم:** {remaining}\n\n"
+            f"✨ أرسل صوراً جديدة لزيادة رصيدك!"
+        )
+    else:
+        await update.message.reply_text("❌ حدث خطأ، يرجى المحاولة مرة أخرى")
+
+async def myplan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """الأمر /myplan - عرض خطة المستخدم الحالية"""
+    user_id = update.message.from_user.id
+    user = get_or_create_image_user(user_id)
+    
+    if user:
+        plan = user.get('plan', 'free')
+        premium_until = user.get('premium_until')
+        
+        if plan != 'free' and premium_until:
+            await update.message.reply_text(
+                f"💎 **خطتك الحالية: مميز**\n\n"
+                f"📅 ينتهي الاشتراك في: {premium_until}\n"
+                f"📊 حدك اليومي: {get_user_plan_limit(user_id)} صورة\n\n"
+                f"لتجديد اشتراكك، استخدم الأمر /premium"
+            )
+        else:
+            await update.message.reply_text(
+                f"🎁 **خطتك الحالية: مجانية**\n\n"
+                f"📊 حدك اليومي: {get_user_plan_limit(user_id)} صورة\n\n"
+                f"للترقية إلى الخطة المميزة، استخدم الأمر /premium"
+            )
+    else:
+        await update.message.reply_text("❌ حدث خطأ")
+
+async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """الأمر /premium - عرض خطط الاشتراك"""
+    await update.message.reply_text(
+        "💎 **باقات الاشتراك المميز**\n\n"
+        "📊 **الباقة المجانية:**\n"
+        "• 5 صور يومياً\n"
+        "• ضغط تلقائي للصور\n"
+        "• روابط مختصرة\n\n"
+        "💎 **الباقة المميزة (شهري - 5$):**\n"
+        "• 100 صورة يومياً\n"
+        "• ضغط تلقائي للصور\n"
+        "• روابط مختصرة\n"
+        "• دعم الأولوية\n\n"
+        "👑 **الباقة المميزة (سنوي - 50$):**\n"
+        "• 100 صورة يومياً\n"
+        "• خصم 16%\n"
+        "• جميع ميزات الباقة المميزة\n\n"
+        "✨ **طرق الدفع المتاحة قريباً:**\n"
+        "• ⭐ نجوم Telegram\n"
+        "• 💳 بطاقات الائتمان\n\n"
+        "للاشتراك، تواصل مع المطور: @YourSupportBot"
+    )
 
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
+    first_name = update.message.from_user.first_name
+    username = update.message.from_user.username
+    
     temp_raw = f"temp_raw_{user_id}.jpg"
     temp_comp = f"temp_comp_{user_id}.jpg"
     
     try:
+        # ✅ التحقق من الحد اليومي
+        can_upload, message = can_user_upload(user_id)
+        if not can_upload:
+            await update.message.reply_text(message)
+            return
+        
         await update.message.reply_text("🖼️ جاري المعالجة...")
         
         # تحميل الصورة
@@ -97,35 +316,41 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file_options={"content-type": "image/jpeg", "upsert": "true"}
             )
         
-        # 🔥 الحصول على الرابط الأصلي (بناء يدوي مضمون)
+        # الحصول على الرابط الأصلي
         bucket_name = "image-links"
         file_path = f"{user_id}/{image_id}.jpg"
         original_url = f"{SUPABASE_URL}/storage/v1/object/public/{bucket_name}/{file_path}"
         
-        # 🔥 الرابط المختصر
+        # الرابط المختصر
         short_url = f"{SHORTENER_URL}/i/{image_id}"
         
-        # 🔥 حفظ البيانات في جدول image_links
+        # حفظ البيانات في جدول image_links
         file_size = os.path.getsize(temp_comp) // 1024
         supabase.table("image_links").insert({
             "image_id": image_id,
             "user_telegram_id": user_id,
-            "first_name": update.message.from_user.first_name,
-            "username": update.message.from_user.username,
+            "first_name": first_name,
+            "username": username,
             "original_url": original_url,
             "short_url": short_url,
             "file_size": file_size
         }).execute()
         
-        # إرسال الرابط للمستخدم
+        # ✅ زيادة العداد اليومي والإجمالي
+        increment_user_upload(user_id)
+        
+        # إرسال الرابط للمستخدم مع المتبقي
         await update.message.reply_text(
             f"✅ **تم تحويل صورتك!**\n\n"
-            f"🔗 {short_url}",
+            f"🔗 {short_url}\n\n"
+            f"📊 متبقي لك اليوم: {message} صورة\n"
+            f"💡 استخدم /stats لعرض إحصائياتك",
             disable_web_page_preview=True
         )
         
     except Exception as e:
-        await update.message.reply_text(f"❌ خطأ: {e}")
+        print(f"Error in handle_image: {e}")
+        await update.message.reply_text(f"❌ حدث خطأ: حاول مرة أخرى")
     finally:
         for path in [temp_raw, temp_comp]:
             if os.path.exists(path):
@@ -136,8 +361,23 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =================================================================================
 def main():
     application = Application.builder().token(TOKEN).build()
+    
+    # الأوامر الأساسية
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("myplan", myplan_command))
+    application.add_handler(CommandHandler("premium", premium_command))
+    
+    # معالجة الصور
     application.add_handler(MessageHandler(filters.PHOTO, handle_image))
+    
+    # إعداد أوامر البوت في واجهة تليجرام
+    bot_commands = [
+        BotCommand("start", "بدء البوت"),
+        BotCommand("stats", "إحصائياتك الشخصية"),
+        BotCommand("myplan", "عرض خطتك الحالية"),
+        BotCommand("premium", "معلومات الاشتراك المميز"),
+    ]
     
     print("✅ Image Link Bot is running...")
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
